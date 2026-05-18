@@ -4,6 +4,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 from scipy.stats import norm
 from scipy.optimize import minimize
+import pandas as pd
 
 # Page title shown at the top
 st.title("Stock Market Dashboard")
@@ -422,6 +423,21 @@ num_portfolios = st.sidebar.slider(
     10000,
     3000
 )
+
+portfolio_mc_days = st.sidebar.slider(
+    "Portfolio MC Forecast Days",
+    30,
+    365,
+    252
+)
+
+portfolio_mc_sims = st.sidebar.slider(
+    "Portfolio MC Simulations",
+    100,
+    2000,
+    500
+)
+
 tickers_list = [ticker.strip().upper()
                 for ticker in portfolio_tickers.split(",")]
 
@@ -501,6 +517,37 @@ optimised_portfolio_returns = portfolio_returns.dot(optimised_weights)
 optimised_portfolio_value = (
     (1 + optimised_portfolio_returns).cumprod() * 100
 )
+
+portfolio_daily_mean = optimised_portfolio_returns.mean()
+portfolio_daily_volatility = optimised_portfolio_returns.std()
+
+starting_portfolio_value = 100
+
+portfolio_simulation = np.zeros((portfolio_mc_days, portfolio_mc_sims))
+
+for sim in range(portfolio_mc_sims):
+    values = [starting_portfolio_value]
+
+    for day in range(1, portfolio_mc_days):
+        random_return = np.random.normal(
+            portfolio_daily_mean,
+            portfolio_daily_volatility
+        )
+
+        next_value = values[-1] * (1 + random_return)
+        values.append(next_value)
+
+    portfolio_simulation[:, sim] = values
+
+portfolio_final_values = portfolio_simulation[-1, :]
+
+portfolio_expected_final = portfolio_final_values.mean()
+portfolio_median_final = np.median(portfolio_final_values)
+portfolio_5th = np.percentile(portfolio_final_values, 5)
+portfolio_95th = np.percentile(portfolio_final_values, 95)
+portfolio_prob_profit = np.mean(
+    portfolio_final_values > starting_portfolio_value
+) * 100
 
 benchmark_portfolio = (
     benchmark_close / benchmark_close.iloc[0] * 100
@@ -692,3 +739,134 @@ ax_backtest.legend()
 ax_backtest.grid()
 
 st.pyplot(fig_backtest)
+
+st.subheader("Optimised Portfolio Monte Carlo Simulation")
+
+st.write(f"Expected Final Portfolio Value: {portfolio_expected_final:.2f}")
+st.write(f"Median Final Portfolio Value: {portfolio_median_final:.2f}")
+st.write(f"5th Percentile Portfolio Value: {portfolio_5th:.2f}")
+st.write(f"95th Percentile Portfolio Value: {portfolio_95th:.2f}")
+st.write(f"Probability of Profit: {portfolio_prob_profit:.2f}%")
+
+fig_port_mc, ax_port_mc = plt.subplots()
+
+ax_port_mc.plot(portfolio_simulation, alpha=0.1)
+
+mean_portfolio_path = portfolio_simulation.mean(axis=1)
+lower_portfolio_band = np.percentile(portfolio_simulation, 5, axis=1)
+upper_portfolio_band = np.percentile(portfolio_simulation, 95, axis=1)
+
+ax_port_mc.plot(mean_portfolio_path, linewidth=2, label="Mean Path")
+ax_port_mc.plot(lower_portfolio_band, linestyle="--", linewidth=2, label="5th Percentile")
+ax_port_mc.plot(upper_portfolio_band, linestyle="--", linewidth=2, label="95th Percentile")
+
+ax_port_mc.set_title("Optimised Portfolio Monte Carlo Simulation")
+ax_port_mc.set_xlabel("Future Trading Days")
+ax_port_mc.set_ylabel("Portfolio Value")
+ax_port_mc.legend()
+ax_port_mc.grid()
+
+st.pyplot(fig_port_mc)
+
+st.header("News and Macro Context")
+
+st.subheader(f"Latest News for {ticker}")
+
+stock_news = yf.Ticker(ticker).news
+
+if len(stock_news) == 0:
+    st.write("No recent news found.")
+else:
+    for article in stock_news[:5]:
+        title = article.get("title", "No title")
+        publisher = article.get("publisher", "Unknown publisher")
+        link = article.get("link", "")
+
+        st.write(f"**{title}**")
+        st.write(f"Source: {publisher}")
+
+        if link:
+            st.link_button("Read article", link)
+
+st.subheader("Portfolio Stock News")
+
+for stock in tickers_list:
+    st.write(f"### {stock}")
+
+    try:
+        news_items = yf.Ticker(stock).news
+
+        if len(news_items) == 0:
+            st.write("No recent news found.")
+
+        for article in news_items[:3]:
+            title = article.get("title", "No title")
+            publisher = article.get("publisher", "Unknown publisher")
+            link = article.get("link", "")
+
+            st.write(f"**{title}**")
+            st.write(f"Source: {publisher}")
+
+            if link:
+                st.link_button("Read article", link)
+
+    except Exception as e:
+        st.write(f"Could not load news for {stock}")
+
+st.subheader("Macro Market Indicators")
+
+macro_tickers = {
+    "S&P 500": "^GSPC",
+    "Nasdaq": "^IXIC",
+    "VIX Fear Index": "^VIX",
+    "US 10-Year Treasury Yield": "^TNX",
+    "US Dollar Index": "DX-Y.NYB"
+}
+
+macro_data = {}
+
+for name, macro_ticker in macro_tickers.items():
+    try:
+        macro_prices = yf.download(
+            macro_ticker,
+            period="1mo",
+            progress=False
+        )["Close"].squeeze()
+
+        if not macro_prices.empty:
+            latest_value = macro_prices.iloc[-1]
+            one_month_change = (
+                latest_value / macro_prices.iloc[0] - 1
+            ) * 100
+
+            macro_data[name] = {
+                "Latest Value": latest_value,
+                "1-Month Change (%)": one_month_change
+            }
+
+    except Exception:
+        st.write(f"Could not load {name}")
+
+macro_df = pd.DataFrame(macro_data).T
+st.dataframe(macro_df)
+
+st.subheader("Macro Interpretation Guide")
+
+macro_table = {
+    "Indicator": [
+        "S&P 500",
+        "Nasdaq",
+        "VIX",
+        "US 10-Year Treasury Yield",
+        "US Dollar Index"
+    ],
+    "Why It Matters": [
+        "Broad US equity market direction",
+        "Growth and technology stock sentiment",
+        "Measures market fear and expected volatility",
+        "Higher yields can pressure stock valuations",
+        "Stronger dollar can affect global companies and commodities"
+    ]
+}
+
+st.table(macro_table)
