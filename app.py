@@ -14,6 +14,16 @@ st.title("Stock Market Dashboard")
 # AAPL is defaul
 ticker = st.sidebar.text_input("Ticker Symbol", "AAPL")
 
+screener_tickers = st.sidebar.text_area(
+    "Stock Screener Universe",
+    "AAPL,MSFT,NVDA,GOOGL,AMZN,META,TSLA,JPM,JNJ,KO"
+)
+
+run_screener = st.sidebar.checkbox(
+    "Run Stock Screener",
+    value=False
+)
+
 #sidebar drop down to choose period 
 period = st.sidebar.selectbox(
     "Time Period",
@@ -61,7 +71,38 @@ benchmark_close = benchmark_data["Close"].squeeze()
 data["Short MA"] = close.rolling(short_ma).mean()
 data["Long MA"] = close.rolling(long_ma).mean()
 
+# Bollinger Bands
+data["BB Middle"] = close.rolling(20).mean()
+rolling_std = close.rolling(20).std()
+
+data["BB Upper"] = data["BB Middle"] + 2 * rolling_std
+data["BB Lower"] = data["BB Middle"] - 2 * rolling_std
+
+# MACD
+ema_12 = close.ewm(span=12, adjust=False).mean()
+ema_26 = close.ewm(span=26, adjust=False).mean()
+
+data["MACD"] = ema_12 - ema_26
+data["Signal"] = data["MACD"].ewm(span=9, adjust=False).mean()
+data["MACD Histogram"] = data["MACD"] - data["Signal"]
+
 data["Returns"] = close.pct_change()
+
+
+
+# RSI (14-day)
+delta = close.diff()
+
+gain = delta.clip(lower=0)
+loss = -delta.clip(upper=0)
+
+average_gain = gain.rolling(14).mean()
+average_loss = loss.rolling(14).mean()
+
+rs = average_gain / average_loss
+
+data["RSI"] = 100 - (100 / (1 + rs))
+
 benchmark_returns = benchmark_close.pct_change()
 # Normalise both series so they start at 100
 normalised_stock = close / close.iloc[0] * 100
@@ -87,8 +128,18 @@ benchmark_annual_return = (
     combined_returns["Benchmark"].mean() * 252 * 100
 )
 
+stock_info = yf.Ticker(ticker).info
 
 data["Rolling Volatility"] = data["Returns"].rolling(21).std() * np.sqrt(252) * 100
+
+# Rolling Sharpe Ratio (63 trading days ≈ 3 months)
+rolling_return = data["Returns"].rolling(63).mean() * 252
+rolling_volatility = data["Returns"].rolling(63).std() * np.sqrt(252)
+
+data["Rolling Sharpe"] = (
+    (rolling_return * 100 - risk_free_rate)
+    / (rolling_volatility * 100)
+)
 
 data["Running Max"] = close.cummax()
 data["Drawdown"] = (close / data["Running Max"] - 1) * 100
@@ -99,19 +150,176 @@ total_return = (close.iloc[-1] / close.iloc[0] - 1) * 100
 annual_volatility = data["Returns"].std() * np.sqrt(252) * 100
 average_daily_return = data["Returns"].mean()
 annual_return = average_daily_return * 252 * 100
+alpha = annual_return - beta * benchmark_annual_return
 sharpe_ratio = (annual_return - risk_free_rate) / annual_volatility
+downside_returns = data["Returns"][data["Returns"] < 0]
+downside_volatility = downside_returns.std() * np.sqrt(252) * 100
+sortino_ratio = (annual_return - risk_free_rate) / downside_volatility
+
 max_drawdown = data["Drawdown"].min()
 # 5th percentile = 95% one-day VaR
 var_95 = np.percentile(data["Returns"].dropna() * 100, 5)
+returns_clean = data["Returns"].dropna() * 100
+expected_shortfall = returns_clean[returns_clean <= var_95].mean()
+# -----------------------------
+# Enhanced Investment Decision Support
+# -----------------------------
 
-# Average of returns worse than the VaR (Expected Shortfall)
-expected_shortfall = (
-    data["Returns"].dropna()[data["Returns"].dropna() * 100 <= var_95]
-    .mean() * 100
-)
+decision_score = 0
+decision_reasons = []
+risk_warnings = []
 
-# Alpha = Stock return - Beta × Benchmark return
-alpha = annual_return - beta * benchmark_annual_return
+# Return
+if annual_return > 15:
+    decision_score += 2
+    decision_reasons.append("Annualised return is strong.")
+elif annual_return > risk_free_rate:
+    decision_score += 1
+    decision_reasons.append("Annualised return is above the risk-free rate.")
+else:
+    decision_score -= 2
+    risk_warnings.append("Annualised return is below the risk-free rate.")
+
+# Sharpe Ratio
+if sharpe_ratio > 1.5:
+    decision_score += 2
+    decision_reasons.append("Sharpe ratio is strong.")
+elif sharpe_ratio > 0.5:
+    decision_score += 1
+    decision_reasons.append("Sharpe ratio is acceptable.")
+else:
+    decision_score -= 1
+    risk_warnings.append("Sharpe ratio is weak.")
+
+# Sortino Ratio
+if sortino_ratio > 2:
+    decision_score += 2
+    decision_reasons.append("Sortino ratio suggests strong downside-adjusted performance.")
+elif sortino_ratio > 1:
+    decision_score += 1
+    decision_reasons.append("Sortino ratio is reasonable.")
+else:
+    decision_score -= 1
+    risk_warnings.append("Sortino ratio is weak.")
+
+# Drawdown
+if max_drawdown > -15:
+    decision_score += 2
+    decision_reasons.append("Maximum drawdown is relatively controlled.")
+elif max_drawdown > -30:
+    decision_score += 0
+    risk_warnings.append("Maximum drawdown is moderate.")
+else:
+    decision_score -= 2
+    risk_warnings.append("Maximum drawdown is severe.")
+
+# VaR
+if var_95 > -2:
+    decision_score += 2
+    decision_reasons.append("Daily VaR is relatively low.")
+elif var_95 > -4:
+    decision_score += 0
+    risk_warnings.append("Daily VaR is moderate.")
+else:
+    decision_score -= 2
+    risk_warnings.append("Daily VaR is high.")
+
+# Beta
+if beta < 0.8:
+    decision_score += 1
+    decision_reasons.append("Beta is defensive versus the benchmark.")
+elif beta <= 1.3:
+    decision_score += 1
+    decision_reasons.append("Beta is reasonably close to market sensitivity.")
+else:
+    decision_score -= 1
+    risk_warnings.append("Beta is high, meaning the stock is more market-sensitive.")
+
+# Alpha
+if alpha > 5:
+    decision_score += 2
+    decision_reasons.append("Alpha is positive, suggesting outperformance versus benchmark exposure.")
+elif alpha > 0:
+    decision_score += 1
+    decision_reasons.append("Alpha is slightly positive.")
+else:
+    decision_score -= 1
+    risk_warnings.append("Alpha is negative versus benchmark exposure.")
+
+# RSI
+latest_rsi = data["RSI"].dropna().iloc[-1]
+
+if latest_rsi > 75:
+    decision_score -= 1
+    risk_warnings.append("RSI is very high, suggesting the stock may be overbought.")
+elif latest_rsi < 30:
+    decision_score += 1
+    decision_reasons.append("RSI is low, suggesting the stock may be oversold.")
+else:
+    decision_score += 1
+    decision_reasons.append("RSI is not showing extreme overbought conditions.")
+
+if decision_score >= 9:
+    decision_signal = "Potential Buy"
+elif decision_score >= 5:
+    decision_signal = "Watch / Hold"
+elif decision_score >= 1:
+    decision_signal = "Wait"
+else:
+    decision_signal = "High Risk / Avoid"
+
+st.subheader("Company Information")
+
+company_name = stock_info.get("longName", ticker)
+sector = stock_info.get("sector", "N/A")
+industry = stock_info.get("industry", "N/A")
+market_cap = stock_info.get("marketCap", "N/A")
+pe_ratio = stock_info.get("trailingPE", "N/A")
+dividend_yield = stock_info.get("dividendYield", "N/A")
+
+st.write(f"**Company:** {company_name}")
+st.write(f"**Sector:** {sector}")
+st.write(f"**Industry:** {industry}")
+
+if market_cap != "N/A":
+    st.write(f"**Market Cap:** ${market_cap:,.0f}")
+else:
+    st.write("**Market Cap:** N/A")
+
+st.write(f"**P/E Ratio:** {pe_ratio}")
+
+if dividend_yield != "N/A":
+    st.write(f"**Dividend Yield:** {dividend_yield * 100:.2f}%")
+else:
+    st.write("**Dividend Yield:** N/A")
+
+st.subheader("Earnings and Dividend Calendar")
+
+try:
+    stock_obj = yf.Ticker(ticker)
+
+    # Earnings dates
+    earnings_dates = stock_obj.get_earnings_dates(limit=4)
+
+    st.write("### Upcoming / Recent Earnings")
+
+    if earnings_dates is not None and not earnings_dates.empty:
+        st.write(earnings_dates)
+    else:
+        st.write("No earnings dates found.")
+
+    # Dividend information
+    dividends = stock_obj.dividends
+
+    st.write("### Recent Dividends")
+
+    if not dividends.empty:
+        st.write(dividends.tail(5))
+    else:
+        st.write("No recent dividend data found.")
+
+except Exception:
+    st.write("Could not load earnings or dividend data.")
 
 # show the data
 st.subheader("Raw Stock Data")
@@ -124,12 +332,41 @@ st.write(f"Annualised Return: {annual_return:.2f}%")
 st.write(f"Annual Volatility: {annual_volatility:.2f}%")
 st.write(f"Risk-Free Rate: {risk_free_rate:.2f}%")
 st.write(f"Sharpe Ratio: {sharpe_ratio:.2f}")
+st.write(f"Sortino Ratio: {sortino_ratio:.2f}")
+st.write("""
+Sortino Ratio is similar to Sharpe Ratio, but it only penalises downside risk.
+A higher Sortino Ratio suggests the stock has delivered better returns relative to harmful volatility.
+""")
 st.write(f"Beta vs {benchmark}: {beta:.2f}")
 st.write(f"Alpha vs {benchmark}: {alpha:.2f}%")
 
 st.write(f"Maximum Drawdown: {max_drawdown:.2f}%")
 st.write(f"95% 1-Day VaR: {var_95:.2f}%")
 st.write(f"Expected Shortfall: {expected_shortfall:.2f}%")
+
+st.subheader("Investment Decision Support")
+
+st.write(f"### Dashboard Signal: {decision_signal}")
+st.write(f"Decision Score: {decision_score}")
+
+st.write("**Positive Factors:**")
+if len(decision_reasons) > 0:
+    for reason in decision_reasons:
+        st.write(f"- {reason}")
+else:
+    st.write("- No major positive factors detected.")
+
+st.write("**Risk Warnings:**")
+if len(risk_warnings) > 0:
+    for warning in risk_warnings:
+        st.write(f"- {warning}")
+else:
+    st.write("- No major risk warnings detected.")
+
+st.warning(
+    "This is not financial advice. This signal is based only on the dashboard's quantitative metrics and should be combined with further research."
+)
+
 st.subheader("VaR Interpretation")
 
 var_table = {
@@ -188,6 +425,104 @@ ax.legend()
 ax.grid()
 
 st.pyplot(fig)
+
+st.subheader("Relative Strength Index (RSI)")
+
+st.write("""
+RSI measures recent momentum on a scale from 0 to 100.
+
+- Above 70 may suggest the stock is overbought.
+- Below 30 may suggest the stock is oversold.
+- Around 50 suggests balanced momentum.
+""")
+
+fig_rsi, ax_rsi = plt.subplots()
+
+ax_rsi.plot(data.index, data["RSI"], label="RSI")
+
+ax_rsi.axhline(70, linestyle="--", color="red", label="Overbought (70)")
+ax_rsi.axhline(30, linestyle="--", color="green", label="Oversold (30)")
+ax_rsi.axhline(50, linestyle="--", linewidth=1)
+
+ax_rsi.set_title(f"{ticker} RSI (14-Day)")
+ax_rsi.set_xlabel("Date")
+ax_rsi.set_ylabel("RSI")
+ax_rsi.set_ylim(0, 100)
+ax_rsi.legend()
+ax_rsi.grid()
+
+st.pyplot(fig_rsi)
+
+st.subheader("Bollinger Bands")
+
+st.write("""
+Bollinger Bands show where the stock price sits relative to its recent average range.
+
+- Price near the upper band suggests strong recent momentum.
+- Price near the lower band suggests weakness or possible oversold conditions.
+- Wider bands mean higher volatility.
+- Narrower bands mean lower volatility.
+""")
+
+fig_bb, ax_bb = plt.subplots()
+
+ax_bb.plot(data.index, close, label="Close")
+ax_bb.plot(data.index, data["BB Middle"], label="20-Day MA")
+ax_bb.plot(data.index, data["BB Upper"], linestyle="--", label="Upper Band")
+ax_bb.plot(data.index, data["BB Lower"], linestyle="--", label="Lower Band")
+
+ax_bb.fill_between(
+    data.index,
+    data["BB Lower"],
+    data["BB Upper"],
+    alpha=0.1
+)
+
+ax_bb.set_title(f"{ticker} Bollinger Bands")
+ax_bb.set_xlabel("Date")
+ax_bb.set_ylabel("Price")
+ax_bb.legend()
+ax_bb.grid()
+
+st.pyplot(fig_bb)
+
+st.subheader("MACD")
+
+st.write("""
+MACD compares short-term and long-term momentum.
+
+- MACD above the signal line suggests bullish momentum.
+- MACD below the signal line suggests bearish momentum.
+- A rising histogram suggests momentum is strengthening.
+- A falling histogram suggests momentum is weakening.
+""")
+
+fig_macd, ax_macd = plt.subplots()
+
+ax_macd.plot(data.index, data["MACD"], label="MACD")
+ax_macd.plot(data.index, data["Signal"], label="Signal Line")
+
+hist_colors = [
+    "green" if x >= 0 else "red"
+    for x in data["MACD Histogram"]
+]
+
+ax_macd.bar(
+    data.index,
+    data["MACD Histogram"],
+    color=hist_colors,
+    alpha=0.5
+)
+
+ax_macd.axhline(0, linestyle="--", linewidth=1)
+
+ax_macd.set_title(f"{ticker} MACD")
+ax_macd.set_xlabel("Date")
+ax_macd.set_ylabel("MACD")
+ax_macd.legend()
+ax_macd.grid()
+
+st.pyplot(fig_macd)
 
 st.subheader("Trend Forecast")
 
@@ -310,8 +645,19 @@ st.subheader("Daily Returns")
 
 fig2, ax2 = plt.subplots()
 
-ax2.plot(data.index, data["Returns"] * 100) # * 100 for %
+daily_returns_pct = data["Returns"] * 100
 
+colors=[
+    "green" if r>=0 else "red"
+    for r in daily_returns_pct
+]
+
+ax2.bar(
+    data.index,
+    daily_returns_pct,
+    width=1.0,
+    color=colors
+)
 ax2.set_title(f"{ticker} Daily Returns")
 ax2.set_xlabel("Date")
 ax2.set_ylabel("Daily Return (%)")
@@ -526,6 +872,45 @@ ax3.axhline(40, linestyle="--", linewidth=1)
 ax3.grid()
 
 st.pyplot(fig3)
+
+st.subheader("Rolling Sharpe Ratio")
+
+st.write("""
+The Rolling Sharpe Ratio measures how attractive the stock's returns have been
+relative to risk over the last 63 trading days (about 3 months).
+
+- Above 2: Excellent risk-adjusted performance
+- Above 1: Good
+- Around 0: Limited reward for risk
+- Negative: Poor risk-adjusted performance
+""")
+
+fig_sharpe, ax_sharpe = plt.subplots()
+
+ax_sharpe.plot(
+    data.index,
+    data["Rolling Sharpe"],
+    linewidth=2
+)
+
+# Reference lines
+ax_sharpe.axhline(2, linestyle="--", color="green", label="Excellent (2)")
+ax_sharpe.axhline(1, linestyle="--", color="blue", label="Good (1)")
+ax_sharpe.axhline(0, linestyle="--", color="black", label="Neutral (0)")
+
+# Background zones
+ax_sharpe.axhspan(2, 10, color="green", alpha=0.1)
+ax_sharpe.axhspan(1, 2, color="blue", alpha=0.08)
+ax_sharpe.axhspan(0, 1, color="yellow", alpha=0.08)
+ax_sharpe.axhspan(-10, 0, color="red", alpha=0.08)
+
+ax_sharpe.set_title(f"{ticker} Rolling Sharpe Ratio")
+ax_sharpe.set_xlabel("Date")
+ax_sharpe.set_ylabel("Sharpe Ratio")
+ax_sharpe.legend()
+ax_sharpe.grid()
+
+st.pyplot(fig_sharpe)
 
 st.subheader("Drawdown")
 
@@ -1044,25 +1429,33 @@ ax_port_mc.grid()
 
 st.pyplot(fig_port_mc)
 
+
 st.header("News and Macro Context")
 
 st.subheader(f"Latest News for {ticker}")
 
-stock_news = yf.Ticker(ticker).news
+try:
+    stock_news = yf.Ticker(ticker).news
 
-if len(stock_news) == 0:
-    st.write("No recent news found.")
-else:
-    for article in stock_news[:5]:
-        title = article.get("title", "No title")
-        publisher = article.get("publisher", "Unknown publisher")
-        link = article.get("link", "")
+    if len(stock_news) == 0:
+        st.write("No recent news found.")
+    else:
+        for article in stock_news[:5]:
 
-        st.write(f"**{title}**")
-        st.write(f"Source: {publisher}")
+            content = article.get("content", {})
 
-        if link:
-            st.link_button("Read article", link)
+            title = content.get("title", "No title")
+            publisher = content.get("provider", {}).get("displayName", "Unknown publisher")
+            link = content.get("canonicalUrl", {}).get("url", "")
+
+            st.write(f"**{title}**")
+            st.write(f"Source: {publisher}")
+
+            if link:
+                st.link_button("Read article", link)
+
+except Exception as e:
+    st.write(f"Could not load news for {ticker}.")
 
 st.subheader("Portfolio Stock News")
 
@@ -1076,9 +1469,12 @@ for stock in tickers_list:
             st.write("No recent news found.")
 
         for article in news_items[:3]:
-            title = article.get("title", "No title")
-            publisher = article.get("publisher", "Unknown publisher")
-            link = article.get("link", "")
+
+            content = article.get("content", {})
+
+            title = content.get("title", "No title")
+            publisher = content.get("provider", {}).get("displayName", "Unknown publisher")
+            link = content.get("canonicalUrl", {}).get("url", "")
 
             st.write(f"**{title}**")
             st.write(f"Source: {publisher}")
@@ -1086,8 +1482,8 @@ for stock in tickers_list:
             if link:
                 st.link_button("Read article", link)
 
-    except Exception as e:
-        st.write(f"Could not load news for {stock}")
+    except Exception:
+        st.write(f"Could not load news for {stock}.")
 
 st.subheader("Macro Market Indicators")
 
@@ -1146,3 +1542,108 @@ macro_table = {
 }
 
 st.table(macro_table)
+
+if run_screener:
+    st.header("Stock Screener")
+
+    screener_list = [
+        stock.strip().upper()
+        for stock in screener_tickers.split(",")
+        if stock.strip() != ""
+    ]
+
+    screener_results = []
+
+    for stock in screener_list:
+        try:
+            temp_data = yf.download(
+                stock,
+                period=period,
+                progress=False
+            )
+
+            if temp_data.empty:
+                continue
+
+            temp_close = temp_data["Close"].squeeze()
+            temp_returns = temp_close.pct_change().dropna()
+
+            temp_annual_return = temp_returns.mean() * 252 * 100
+            temp_annual_volatility = (
+                temp_returns.std() * np.sqrt(252) * 100
+            )
+
+            if temp_annual_volatility == 0:
+                continue
+
+            temp_sharpe = (
+                temp_annual_return - risk_free_rate
+            ) / temp_annual_volatility
+
+            temp_running_max = temp_close.cummax()
+            temp_drawdown = (
+                temp_close / temp_running_max - 1
+            ) * 100
+
+            temp_max_drawdown = temp_drawdown.min()
+
+            temp_var_95 = np.percentile(
+                temp_returns * 100,
+                5
+            )
+
+            # Scoring
+            temp_score = 0
+
+            if temp_annual_return > 15:
+                temp_score += 2
+            elif temp_annual_return > risk_free_rate:
+                temp_score += 1
+            else:
+                temp_score -= 1
+
+            if temp_sharpe > 1:
+                temp_score += 2
+            elif temp_sharpe > 0.5:
+                temp_score += 1
+            else:
+                temp_score -= 1
+
+            if temp_max_drawdown > -20:
+                temp_score += 1
+            else:
+                temp_score -= 1
+
+            if temp_var_95 > -3:
+                temp_score += 1
+            else:
+                temp_score -= 1
+
+            screener_results.append({
+                "Ticker": stock,
+                "Annual Return (%)": temp_annual_return,
+                "Annual Volatility (%)": temp_annual_volatility,
+                "Sharpe Ratio": temp_sharpe,
+                "Max Drawdown (%)": temp_max_drawdown,
+                "95% VaR (%)": temp_var_95,
+                "Score": temp_score
+            })
+
+        except Exception:
+            pass
+
+    if len(screener_results) == 0:
+        st.write("No valid screener results found.")
+    else:
+        screener_df = pd.DataFrame(screener_results)
+
+        screener_df = screener_df.sort_values(
+            by="Score",
+            ascending=False
+        )
+
+        st.subheader("Ranked Stocks")
+        st.dataframe(screener_df)
+
+        st.subheader("Top Ranked Stock")
+        st.write(screener_df.iloc[0])
