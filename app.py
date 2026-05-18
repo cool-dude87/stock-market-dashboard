@@ -46,6 +46,8 @@ if data.empty:
     st.error("No data found. Check the ticker symbol and try again.")
     st.stop()
 
+data = data.sort_index()
+
 benchmark_data = yf.download(benchmark, period=period, progress=False)
 
 if benchmark_data.empty:
