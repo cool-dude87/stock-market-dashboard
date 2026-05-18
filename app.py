@@ -298,25 +298,29 @@ st.subheader("Earnings and Dividend Calendar")
 try:
     stock_obj = yf.Ticker(ticker)
 
-    # Earnings dates
-    earnings_dates = stock_obj.get_earnings_dates(limit=4)
-
     st.write("### Upcoming / Recent Earnings")
 
-    if earnings_dates is not None and not earnings_dates.empty:
-        st.write(earnings_dates)
-    else:
-        st.write("No earnings dates found.")
+    try:
+        earnings_dates = stock_obj.get_earnings_dates(limit=4)
 
-    # Dividend information
-    dividends = stock_obj.dividends
+        if earnings_dates is not None and not earnings_dates.empty:
+            st.write(earnings_dates)
+        else:
+            st.write("No earnings dates found for this ticker.")
+    except Exception:
+        st.write("Earnings data is unavailable for this ticker.")
 
     st.write("### Recent Dividends")
 
-    if not dividends.empty:
-        st.write(dividends.tail(5))
-    else:
-        st.write("No recent dividend data found.")
+    try:
+        dividends = stock_obj.dividends
+
+        if dividends is not None and not dividends.empty:
+            st.write(dividends.tail(5))
+        else:
+            st.write("No recent dividend data found. This company may not currently pay dividends.")
+    except Exception:
+        st.write("Dividend data is unavailable for this ticker.")
 
 except Exception:
     st.write("Could not load earnings or dividend data.")
@@ -1089,8 +1093,17 @@ portfolio_mc_sims = st.sidebar.slider(
     500
 )
 
+initial_investment = st.sidebar.number_input(
+    "Initial Investment (£)",
+    min_value=100.0,
+    value=1000.0,
+    step=100.0
+)
+
 tickers_list = [ticker.strip().upper()
                 for ticker in portfolio_tickers.split(",")]
+
+
 
 portfolio_data = yf.download(
     tickers_list,
@@ -1206,6 +1219,15 @@ portfolio_expected_final = portfolio_final_values.mean()
 portfolio_median_final = np.median(portfolio_final_values)
 portfolio_5th = np.percentile(portfolio_final_values, 5)
 portfolio_95th = np.percentile(portfolio_final_values, 95)
+expected_return_pct = portfolio_expected_final - 100
+median_return_pct = portfolio_median_final - 100
+pessimistic_return_pct = portfolio_5th - 100
+optimistic_return_pct = portfolio_95th - 100
+
+expected_final_money = initial_investment * portfolio_expected_final / 100
+median_final_money = initial_investment * portfolio_median_final / 100
+pessimistic_final_money = initial_investment * portfolio_5th / 100
+optimistic_final_money = initial_investment * portfolio_95th / 100
 portfolio_prob_profit = np.mean(
     portfolio_final_values > starting_portfolio_value
 ) * 100
@@ -1403,10 +1425,10 @@ st.pyplot(fig_backtest)
 
 st.subheader("Optimised Portfolio Monte Carlo Simulation")
 
-st.write(f"Expected Final Portfolio Value: {portfolio_expected_final:.2f}")
-st.write(f"Median Final Portfolio Value: {portfolio_median_final:.2f}")
-st.write(f"5th Percentile Portfolio Value: {portfolio_5th:.2f}")
-st.write(f"95th Percentile Portfolio Value: {portfolio_95th:.2f}")
+st.write(f"Expected Final Value: £{expected_final_money:,.2f} ({expected_return_pct:.2f}%)")
+st.write(f"Median Final Value: £{median_final_money:,.2f} ({median_return_pct:.2f}%)")
+st.write(f"5th Percentile Value: £{pessimistic_final_money:,.2f} ({pessimistic_return_pct:.2f}%)")
+st.write(f"95th Percentile Value: £{optimistic_final_money:,.2f} ({optimistic_return_pct:.2f}%)")
 st.write(f"Probability of Profit: {portfolio_prob_profit:.2f}%")
 
 fig_port_mc, ax_port_mc = plt.subplots()
