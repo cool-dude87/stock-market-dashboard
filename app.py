@@ -453,6 +453,16 @@ if portfolio_data.empty:
 
 portfolio_returns = portfolio_data.pct_change().dropna()
 
+annual_asset_volatility = portfolio_returns.std() * np.sqrt(252)
+
+# Keep only assets with volatility below 100%
+valid_assets = annual_asset_volatility[
+    annual_asset_volatility < 1.0
+].index
+
+portfolio_returns = portfolio_returns[valid_assets]
+tickers_list = list(valid_assets)
+
 correlation_matrix = portfolio_returns.corr()
 expected_returns = portfolio_returns.mean() * 252
 cov_matrix_portfolio = portfolio_returns.cov() * 252
@@ -487,7 +497,7 @@ num_assets = len(tickers_list)
 
 initial_weights = np.array([1 / num_assets] * num_assets)
 
-bounds = tuple((0, 1) for asset in range(num_assets))
+bounds = tuple((0, 0.30) for asset in range(num_assets))
 
 constraints = (
     {"type": "eq", "fun": lambda weights: np.sum(weights) - 1}
