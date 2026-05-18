@@ -5,6 +5,7 @@ import numpy as np
 from scipy.stats import norm
 from scipy.optimize import minimize
 import pandas as pd
+import matplotlib.dates as mdates
 
 # Page title shown at the top
 st.title("Stock Market Dashboard")
@@ -26,6 +27,12 @@ risk_free_rate = st.sidebar.number_input(
     max_value=20.0,
     value=4.5,
     step=0.1
+)
+forecast_days = st.sidebar.slider(
+    "Forecast Days",
+    30,
+    365,
+    90
 )
 
 # sidebarslider to choose average window
@@ -180,6 +187,79 @@ ax.grid()
 
 st.pyplot(fig)
 
+st.subheader("Trend Forecast")
+
+# Create x-values: 0, 1, 2, ..., n-1
+x = np.arange(len(close))
+
+# Fit a straight line to historical prices
+coefficients = np.polyfit(x, close, 1)
+
+slope = coefficients[0]
+intercept = coefficients[1]
+
+# Historical fitted trend
+fitted_trend = np.polyval(coefficients, x)
+
+# Future x-values
+future_x = np.arange(len(close) + forecast_days)
+
+# Historical + future forecast
+forecast_prices = np.polyval(coefficients, future_x)
+
+fig_forecast, ax_forecast = plt.subplots()
+
+# Actual historical prices
+ax_forecast.plot(
+    close.index,
+    close,
+    label="Actual Price",
+    linewidth=2
+)
+
+# Fitted trend over history
+ax_forecast.plot(
+    close.index,
+    fitted_trend,
+    linestyle="--",
+    linewidth=2,
+    label="Trend Line"
+)
+
+# Create future dates
+future_dates = pd.date_range(
+    start=close.index[0],
+    periods=len(future_x),
+    freq="B"  # business days
+)
+
+# Forecast line
+ax_forecast.plot(
+    future_dates,
+    forecast_prices,
+    linestyle=":",
+    linewidth=3,
+    label="Forecast"
+)
+
+ax_forecast.set_title(f"{ticker} Trend Forecast")
+ax_forecast.set_xlabel("Date")
+ax_forecast.set_ylabel("Price")
+ax_forecast.legend()
+ax_forecast.grid()
+ax_forecast.xaxis.set_major_locator(mdates.MonthLocator(interval=1))
+ax_forecast.xaxis.set_major_formatter(mdates.DateFormatter("%b %Y"))
+
+fig_forecast.autofmt_xdate(rotation=45)
+ax_forecast.tick_params(axis="x", labelsize=8)
+
+st.pyplot(fig_forecast)
+
+forecast_final_price = forecast_prices[-1]
+
+st.write(f"Forecast Price in {forecast_days} Trading Days: ${forecast_final_price:.2f}")
+st.write(f"Average Daily Trend: ${slope:.4f}")
+
 st.subheader("Performance vs Benchmark")
 
 fig_bench, ax_bench = plt.subplots()
@@ -237,6 +317,190 @@ ax2.axhline(0, linestyle="--", color="green",linewidth=1)
 ax2.grid()
 
 st.pyplot(fig2)
+
+st.subheader("Time Series Autocorrelation")
+st.write("""
+A time series is a sequence of observations recorded over time, such as daily stock returns.
+
+A lag looks back a certain number of periods.
+
+- Lag 1: Does today's return help predict tomorrow's return?
+- Lag 5: Do returns from one week ago still influence returns today?
+- Lag 20: Do returns from one month ago still influence returns today?
+
+Autocorrelation measures whether returns are related to their past values.
+
+Interpretation of Lag 1:
+
+- Positive autocorrelation:
+  If the stock rises today, it is more likely to rise again tomorrow.
+  If the stock falls today, it is more likely to fall again tomorrow.
+  This is known as momentum.
+
+- Negative autocorrelation:
+  If the stock rises today, it is more likely to fall tomorrow.
+  If the stock falls today, it is more likely to rebound tomorrow.
+  This is known as mean reversion.
+
+- Near zero:
+  Today's return provides little information about tomorrow's return.
+  This is consistent with an efficient market.
+""")
+
+
+clean_returns = data["Returns"].dropna()
+
+lag_1_autocorr = clean_returns.autocorr(lag=1)
+lag_5_autocorr = clean_returns.autocorr(lag=5)
+lag_20_autocorr = clean_returns.autocorr(lag=20)
+
+st.write(f"Lag 1 Autocorrelation: {lag_1_autocorr:.3f}")
+st.write(f"Lag 5 Autocorrelation: {lag_5_autocorr:.3f}")
+st.write(f"Lag 20 Autocorrelation: {lag_20_autocorr:.3f}")
+
+autocorr_table = {
+    "Autocorrelation": [
+        "Positive",
+        "Near zero",
+        "Negative"
+    ],
+    "Meaning": [
+        "Returns tend to continue in the same direction",
+        "Little evidence of linear time dependence",
+        "Returns tend to reverse direction"
+    ],
+    "Finance Interpretation": [
+        "Momentum behaviour",
+        "Market may be fairly efficient over this horizon",
+        "Mean-reversion behaviour"
+    ]
+}
+
+st.table(autocorr_table)
+
+st.subheader("Lag-1 Return Relationship")
+
+# Create x (yesterday's return) and y (today's return)
+x_lag = clean_returns.shift(1).dropna() * 100
+y_current = clean_returns.iloc[1:] * 100
+
+# Fit a straight line: y = m x + c
+coefficients = np.polyfit(x_lag, y_current, 1)
+fitted_line = np.polyval(coefficients, x_lag)
+
+slope = coefficients[0]
+intercept = coefficients[1]
+
+fig_acf, ax_acf = plt.subplots()
+
+# Scatter points as crosses
+ax_acf.scatter(
+    x_lag,
+    y_current,
+    alpha=0.5,
+    marker="x",
+    label="Daily Returns"
+)
+
+# Fitted regression line in red
+ax_acf.plot(
+    x_lag,
+    fitted_line,
+    color="red",
+    linewidth=2,
+    label=f"Fitted Line (Slope = {slope:.3f})"
+)
+
+# Reference lines at zero
+ax_acf.axhline(0, linestyle="--", linewidth=1)
+ax_acf.axvline(0, linestyle="--", linewidth=1)
+
+ax_acf.set_title(f"{ticker}: Today's Return vs Yesterday's Return")
+ax_acf.set_xlabel("Yesterday's Return (%)")
+ax_acf.set_ylabel("Today's Return (%)")
+ax_acf.legend()
+ax_acf.grid()
+st.write(f"Regression Slope: {slope:.4f}")
+
+st.pyplot(fig_acf)
+
+st.subheader("Autocorrelation by Lag")
+
+lags = range(1, 21)
+
+autocorr_values = [
+    clean_returns.autocorr(lag=lag)
+    for lag in lags
+]
+
+n = len(clean_returns)
+significance_bound = 1.96 / np.sqrt(n)
+
+fig_lags, ax_lags = plt.subplots()
+
+# Spikes from zero to each autocorrelation value
+ax_lags.vlines(
+    lags,
+    0,
+    autocorr_values,
+    linewidth=2,
+    alpha=0.7
+)
+
+# Connecting line
+ax_lags.plot(
+    lags,
+    autocorr_values,
+    linewidth=1.5,
+    alpha=0.8,
+    label="Autocorrelation"
+)
+
+# Dots at the tips
+ax_lags.scatter(
+    lags,
+    autocorr_values,
+    s=50
+)
+
+# Zero line
+ax_lags.axhline(
+    0,
+    linestyle="--",
+    linewidth=1
+)
+
+# Significance bounds
+ax_lags.axhline(
+    significance_bound,
+    linestyle="--",
+    color="red",
+    linewidth=1.5,
+    label="95% Significance Bound"
+)
+
+ax_lags.axhline(
+    -significance_bound,
+    linestyle="--",
+    color="red",
+    linewidth=1.5
+)
+
+# Light shading
+ax_lags.axhspan(
+    -significance_bound,
+    significance_bound,
+    color="red",
+    alpha=0.08
+)
+
+ax_lags.set_title(f"{ticker} Return Autocorrelation")
+ax_lags.set_xlabel("Lag (Days)")
+ax_lags.set_ylabel("Autocorrelation")
+ax_lags.legend()
+ax_lags.grid(axis="y")
+
+st.pyplot(fig_lags)
 
 st.subheader("Rolling Volatility")
 
