@@ -109,10 +109,13 @@ normalised_stock = close / close.iloc[0] * 100
 normalised_benchmark = benchmark_close / benchmark_close.iloc[0] * 100
 
 # Align stock and benchmark returns on common dates
-combined_returns = data["Returns"].to_frame("Stock").join(
-    benchmark_returns.to_frame("Benchmark"),
-    how="inner"
-).dropna()
+stock_returns = data["Returns"].squeeze()
+benchmark_returns = benchmark_returns.squeeze()
+
+combined_returns = pd.DataFrame({
+    "Stock": stock_returns,
+    "Benchmark": benchmark_returns
+}).dropna()
 
 # Covariance matrix
 cov_matrix = combined_returns.cov()
