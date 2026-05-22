@@ -65,8 +65,13 @@ if benchmark_data.empty:
     st.stop()
 
 # converts a one-column data frame to a series
-close = data["Close"].squeeze()
-benchmark_close = benchmark_data["Close"].squeeze()
+close = data["Close"]
+if isinstance(close, pd.DataFrame):
+    close = close.iloc[:, 0]
+
+benchmark_close = benchmark_data["Close"]
+if isinstance(benchmark_close, pd.DataFrame):
+    benchmark_close = benchmark_close.iloc[:, 0]
 
 data["Short MA"] = close.rolling(short_ma).mean()
 data["Long MA"] = close.rolling(long_ma).mean()
@@ -992,6 +997,13 @@ simulation_days = st.sidebar.slider("Monte Carlo Forecast Days", 30, 365, 252)
 
 num_simulations = st.sidebar.slider("Number of Simulations", 100, 2000, 500)
 
+initial_investment = st.sidebar.number_input(
+    "Initial Investment (£)",
+    min_value=100.0,
+    value=1000.0,
+    step=100.0
+)
+
 daily_mean_return = data["Returns"].mean()
 daily_volatility = data["Returns"].std()
 
@@ -1019,12 +1031,39 @@ percentile_95 = np.percentile(final_prices, 95)
 
 prob_profit = np.mean(final_prices > last_price) * 100
 
+# Convert price outcomes into investment values
+expected_return_pct = (expected_final_price / last_price - 1) * 100
+median_return_pct = (median_final_price / last_price - 1) * 100
+pessimistic_return_pct = (percentile_5 / last_price - 1) * 100
+optimistic_return_pct = (percentile_95 / last_price - 1) * 100
+
+expected_final_money = initial_investment * expected_final_price / last_price
+median_final_money = initial_investment * median_final_price / last_price
+pessimistic_final_money = initial_investment * percentile_5 / last_price
+optimistic_final_money = initial_investment * percentile_95 / last_price
+
 st.subheader("Monte Carlo Summary")
 
-st.write(f"Expected Final Price: ${expected_final_price:.2f}")
-st.write(f"Median Final Price: ${median_final_price:.2f}")
-st.write(f"5th Percentile Price: ${percentile_5:.2f}")
-st.write(f"95th Percentile Price: ${percentile_95:.2f}")
+st.write(
+    f"Expected Final Value: £{expected_final_money:,.2f} "
+    f"({expected_return_pct:.2f}%)"
+)
+
+st.write(
+    f"Median Final Value: £{median_final_money:,.2f} "
+    f"({median_return_pct:.2f}%)"
+)
+
+st.write(
+    f"5th Percentile Value: £{pessimistic_final_money:,.2f} "
+    f"({pessimistic_return_pct:.2f}%)"
+)
+
+st.write(
+    f"95th Percentile Value: £{optimistic_final_money:,.2f} "
+    f"({optimistic_return_pct:.2f}%)"
+)
+
 st.write(f"Probability of Profit: {prob_profit:.2f}%")
 
 mc_table = {
@@ -1072,7 +1111,7 @@ st.header("Portfolio Optimisation")
 
 portfolio_tickers = st.sidebar.text_input(
     "Portfolio Tickers",
-    "AAPL,MSFT,NVDA,GOOGL"
+    "BATS.L,GAW.L,NVDA,GOOGL,TSM, AMZN"
 )
 
 num_portfolios = st.sidebar.slider(
@@ -1096,12 +1135,7 @@ portfolio_mc_sims = st.sidebar.slider(
     500
 )
 
-initial_investment = st.sidebar.number_input(
-    "Initial Investment (£)",
-    min_value=100.0,
-    value=1000.0,
-    step=100.0
-)
+
 
 tickers_list = [ticker.strip().upper()
                 for ticker in portfolio_tickers.split(",")]
