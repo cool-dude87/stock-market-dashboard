@@ -49,10 +49,34 @@ initial_investment = st.sidebar.number_input(
     step=100.0
 )   
 
-screener_tickers = st.sidebar.text_area(
-    "Stock Screener Universe",
-    "AAPL,MSFT,NVDA,GOOGL,AMZN,META,TSLA,JPM,JNJ,KO"
+sector_universe = {
+    "Technology / AI": "NVDA,MSFT,AAPL,GOOGL,META,AVGO,AMD,TSM,AMZN,ADBE",
+    "Semiconductors": "NVDA,AMD,AVGO,TSM,ASML,INTC,QCOM,MU,TXN,ARM",
+    "UK Quality": "GAW.L,REL.L,ROR.L,ULVR.L,AZN.L,RR.L,HSBA.L,LSEG.L,DGE.L,SPX.L",
+    "Defensive / Dividends": "KO,PEP,JNJ,PG,MDT,MCD,WMT,COST,ULVR.L,BATS.L",
+    "Banks / Financials": "JPM,BAC,GS,MS,BLK,V,MA,HSBA.L,BARC.L,LLOY.L",
+    "Energy": "XOM,CVX,SHEL.L,BP.L,COP,TTE,ENI,EQNR,OXY,SLB",
+    "Healthcare": "LLY,NVO,UNH,JNJ,MRK,ABBV,AZN.L,GSK.L,PFE,TMO",
+    "Consumer Brands": "AMZN,COST,WMT,MCD,NKE,SBUX,DIS,ULVR.L,DGE.L,KO"
+}
+
+selected_sector = st.sidebar.selectbox(
+    "Sector Preset",
+    list(sector_universe.keys())
 )
+
+use_sector_preset = st.sidebar.checkbox(
+    "Use Sector Preset",
+    value=False
+)
+
+if use_sector_preset:
+    screener_tickers = sector_universe[selected_sector]
+else:
+    screener_tickers = st.sidebar.text_area(
+        "Stock Screener Universe",
+        "AAPL,MSFT,NVDA,GOOGL,AMZN,META,TSLA,JPM,JNJ,KO"
+    )
 
 run_screener = st.sidebar.checkbox(
     "Run Stock Screener",
@@ -2456,6 +2480,8 @@ st.table(macro_table)
 if run_screener:
     st.header("Stock Screener")
 
+    st.write(f"Selected Universe: {screener_tickers}")
+
     screener_list = [
         stock.strip().upper()
         for stock in screener_tickers.split(",")
@@ -2466,22 +2492,20 @@ if run_screener:
 
     for stock in screener_list:
         try:
-            temp_data = yf.download(
-                stock,
-                period=period,
-                progress=False
-            )
+            temp_data = load_price_data(stock, period)
 
             if temp_data.empty:
                 continue
 
-            temp_close = temp_data["Close"].squeeze()
+            temp_close = temp_data["Close"]
+
+            if isinstance(temp_close, pd.DataFrame):
+                temp_close = temp_close.iloc[:, 0]
+
             temp_returns = temp_close.pct_change().dropna()
 
             temp_annual_return = temp_returns.mean() * 252 * 100
-            temp_annual_volatility = (
-                temp_returns.std() * np.sqrt(252) * 100
-            )
+            temp_annual_volatility = temp_returns.std() * np.sqrt(252) * 100
 
             if temp_annual_volatility == 0:
                 continue
@@ -2502,7 +2526,6 @@ if run_screener:
                 5
             )
 
-            # Scoring
             temp_score = 0
 
             if temp_annual_return > 15:
@@ -2539,11 +2562,12 @@ if run_screener:
                 "Score": temp_score
             })
 
-        except Exception:
-            pass
+        except Exception as e:
+            st.write(f"{stock} failed: {e}")
 
     if len(screener_results) == 0:
         st.write("No valid screener results found.")
+
     else:
         screener_df = pd.DataFrame(screener_results)
 
@@ -2553,7 +2577,11 @@ if run_screener:
         )
 
         st.subheader("Ranked Stocks")
-        st.dataframe(screener_df)
+        st.dataframe(
+            screener_df,
+            use_container_width=True,
+            hide_index=True
+        )
 
         st.subheader("Top Ranked Stock")
         st.write(screener_df.iloc[0])
