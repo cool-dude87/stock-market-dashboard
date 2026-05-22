@@ -13,9 +13,22 @@ def load_price_data(ticker, period):
 
 @st.cache_data(ttl=3600)
 def load_stock_info(ticker):
+
     try:
-        return yf.Ticker(ticker).info
-    except Exception:
+
+        stock = yf.Ticker(ticker)
+
+        info = stock.fast_info
+
+        regular_info = stock.info
+
+        return {
+            **regular_info,
+            **dict(info)
+        }
+    
+    except Exception as e:
+        st.write(e)
         return {}
 
 #=========================
