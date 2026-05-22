@@ -7,12 +7,34 @@ from scipy.optimize import minimize
 import pandas as pd
 import matplotlib.dates as mdates
 
-# Page title shown at the top
-st.title("Stock Market Dashboard")
+@st.cache_data(ttl=3600)
+def load_price_data(ticker, period):
+    return yf.download(ticker, period=period, progress=False)
 
-#sidebar input where user choose stock
-# AAPL is defaul
-ticker = st.sidebar.text_input("Ticker Symbol", "AAPL")
+@st.cache_data(ttl=3600)
+def load_stock_info(ticker):
+    try:
+        return yf.Ticker(ticker).info
+    except Exception:
+        return {}
+
+#=========================
+#SIDE BAR FUNCTIONS
+#=========================
+
+show_walkthrough = st.sidebar.checkbox(
+    "Show App Walkthrough",
+    value=True
+)
+
+ticker = st.sidebar.text_input("Ticker Symbol", "AAPL")  # AAPL is default
+
+initial_investment = st.sidebar.number_input(
+    "Initial Investment (£)",
+    min_value=100.0,
+    value=1000.0,
+    step=100.0
+)   
 
 screener_tickers = st.sidebar.text_area(
     "Stock Screener Universe",
@@ -24,11 +46,11 @@ run_screener = st.sidebar.checkbox(
     value=False
 )
 
-#sidebar drop down to choose period 
-period = st.sidebar.selectbox(
+period = st.sidebar.selectbox(                              #sidebar drop down to choose period
     "Time Period",
     ["6mo", "1y", "2y", "5y"]
 )
+
 benchmark = st.sidebar.text_input("Benchmark Ticker", "^GSPC")
 
 risk_free_rate = st.sidebar.number_input(
@@ -38,6 +60,7 @@ risk_free_rate = st.sidebar.number_input(
     value=4.5,
     step=0.1
 )
+
 forecast_days = st.sidebar.slider(
     "Forecast Days",
     30,
@@ -45,71 +68,69 @@ forecast_days = st.sidebar.slider(
     90
 )
 
-# sidebarslider to choose average window
-short_ma = st.sidebar.slider("Short Moving Average", 5, 50, 20)
-
+short_ma = st.sidebar.slider("Short Moving Average", 5, 50, 20)         # sidebarslider to choose average window
 long_ma = st.sidebar.slider("Long Moving Average", 50, 200, 50)
 
-# download stock price data
-data = yf.download(ticker, period=period, progress=False)
+simulation_days = st.sidebar.slider("Monte Carlo Forecast Days", 30, 365, 252)
+num_simulations = st.sidebar.slider("Number of Simulations", 100, 2000, 500)
+
+#===============================
+#DOWLOADING DATA
+#===============================
+
+# Dowload stock price data
+data = load_price_data(ticker, period)
+
+# this stops the app if ticker is invalid 
 if data.empty:
     st.error("No data found. Check the ticker symbol and try again.")
     st.stop()
 
+# Ensures data is sorted by date
 data = data.sort_index()
 
-benchmark_data = yf.download(benchmark, period=period, progress=False)
+# Dowload the benchmark data 
+benchmark_data = load_price_data(benchmark, period)
 
+# Stop app if ticker invalid
 if benchmark_data.empty:
     st.error("No benchmark data found. Check the benchmark ticker.")
     st.stop()
 
-# converts a one-column data frame to a series
+#-----------------
+# Load company info
+#-----------------
+
+try:
+    stock_info = load_stock_info(ticker)
+except Exception:
+    stock_info = {}
+
+#=====================================
+# PREPARE PRICE AND RETURN DATA
+#=====================================
+
+# Extract closing prices
 close = data["Close"]
+
+# Convert one-column DataFrame into Series if neccessary
 if isinstance(close, pd.DataFrame):
     close = close.iloc[:, 0]
 
+# Extract benchmark closing prices
 benchmark_close = benchmark_data["Close"]
+
+# Again converts one-column df to series if neccessary
 if isinstance(benchmark_close, pd.DataFrame):
     benchmark_close = benchmark_close.iloc[:, 0]
 
-data["Short MA"] = close.rolling(short_ma).mean()
-data["Long MA"] = close.rolling(long_ma).mean()
-
-# Bollinger Bands
-data["BB Middle"] = close.rolling(20).mean()
-rolling_std = close.rolling(20).std()
-
-data["BB Upper"] = data["BB Middle"] + 2 * rolling_std
-data["BB Lower"] = data["BB Middle"] - 2 * rolling_std
-
-# MACD
-ema_12 = close.ewm(span=12, adjust=False).mean()
-ema_26 = close.ewm(span=26, adjust=False).mean()
-
-data["MACD"] = ema_12 - ema_26
-data["Signal"] = data["MACD"].ewm(span=9, adjust=False).mean()
-data["MACD Histogram"] = data["MACD"] - data["Signal"]
-
+# Calculates daily percentage returns
 data["Returns"] = close.pct_change()
 
-
-
-# RSI (14-day)
-delta = close.diff()
-
-gain = delta.clip(lower=0)
-loss = -delta.clip(upper=0)
-
-average_gain = gain.rolling(14).mean()
-average_loss = loss.rolling(14).mean()
-
-rs = average_gain / average_loss
-
-data["RSI"] = 100 - (100 / (1 + rs))
-
+# Benchmark daily returns
 benchmark_returns = benchmark_close.pct_change()
-# Normalise both series so they start at 100
+
+# Normalises prices so both start at 100
 normalised_stock = close / close.iloc[0] * 100
 normalised_benchmark = benchmark_close / benchmark_close.iloc[0] * 100
 
@@ -117,15 +138,90 @@ normalised_benchmark = benchmark_close / benchmark_close.iloc[0] * 100
 stock_returns = data["Returns"].squeeze()
 benchmark_returns = benchmark_returns.squeeze()
 
+# Align stock and benchmark on mathcing dates
 combined_returns = pd.DataFrame({
     "Stock": stock_returns,
     "Benchmark": benchmark_returns
 }).dropna()
 
-# Covariance matrix
+#==========================================
+# CALCULATE TECHNICAL INDICATORS
+#==========================================
+
+#---------------
+# Moving Averages
+#---------------
+
+data["Short MA"] = close.rolling(short_ma).mean()
+
+data["Long MA"] = close.rolling(long_ma).mean()
+
+#---------------
+# Bollinger Bands
+#---------------
+
+# 20-day moving average
+data["BB Middle"] = close.rolling(20).mean()
+
+# Rolling standard deviation
+rolling_std = close.rolling(20).std()
+
+# Upper and lower bands
+data["BB Upper"] = data["BB Middle"] + 2 * rolling_std
+data["BB Lower"] = data["BB Middle"] - 2 * rolling_std
+
+#---------------
+# MACD
+#---------------
+
+# short term and long term exponential moving avg respectively
+ema_12 = close.ewm(span=12, adjust=False).mean()
+ema_26 = close.ewm(span=26, adjust=False).mean()
+
+# MACD line
+data["MACD"] = ema_12 - ema_26
+
+# Signal line
+data["Signal"] = data["MACD"].ewm(span=9, adjust=False).mean()
+
+# Histogram
+data["MACD Histogram"] = (
+    data["MACD"] - data["Signal"]
+)
+
+#---------------
+# Relative Strength Index (RSI)
+#---------------
+
+# Daily price changes
+delta = close.diff()
+
+# positive and negative return only resp. 
+gain = delta.clip(lower=0)
+loss = -delta.clip(upper=0)
+
+# Rolling averages
+average_gain = gain.rolling(14).mean()
+average_loss = loss.rolling(14).mean()
+
+# Relative Strength
+rs = average_gain / average_loss
+
+# RSI formula
+data["RSI"] = 100 - (100 / (1 + rs))
+
+#================================
+# CALCULATE RISK AND PERFORMANCE METRICS
+#================================
+
+#------------------
+# Benchmark metrics
+#------------------
+
+# Cov matrix between stocks and bench stocks
 cov_matrix = combined_returns.cov()
 
-# Beta = Cov(stock, benchmark) / Var(benchmark)
+# How sensitive stock is to benchmark movements
 beta = (
     cov_matrix.loc["Stock", "Benchmark"]
     / cov_matrix.loc["Benchmark", "Benchmark"]
@@ -136,9 +232,14 @@ benchmark_annual_return = (
     combined_returns["Benchmark"].mean() * 252 * 100
 )
 
-stock_info = yf.Ticker(ticker).info
+#-----------------------
+# Rolling risk metrics
+#-----------------------
 
-data["Rolling Volatility"] = data["Returns"].rolling(21).std() * np.sqrt(252) * 100
+# 21-day rolling volatility, annualised
+data["Rolling Volatility"] = (
+    data["Returns"].rolling(21).std() * np.sqrt(252) * 100
+)
 
 # Rolling Sharpe Ratio (63 trading days ≈ 3 months)
 rolling_return = data["Returns"].rolling(63).mean() * 252
@@ -149,35 +250,82 @@ data["Rolling Sharpe"] = (
     / (rolling_volatility * 100)
 )
 
+#-------------------
+# Drawdown
+#-------------------
+
+# Running maximum price
 data["Running Max"] = close.cummax()
+
+# Draw down from previous peak
 data["Drawdown"] = (close / data["Running Max"] - 1) * 100
 
-# uses root 252 as theres around 252 trading days a year 
+# worst drawdown over selected period
+max_drawdown = data["Drawdown"].min()
+
+#--------------------------
+# Basic Return and volatility metrics
+#--------------------------
+
+# latest available price
 latest_price = close.iloc[-1]
+
+# total return over selected period (ROI)
 total_return = (close.iloc[-1] / close.iloc[0] - 1) * 100
+
+# annualised volatility
 annual_volatility = data["Returns"].std() * np.sqrt(252) * 100
+
+#average daily return
 average_daily_return = data["Returns"].mean()
+
+# annualised return
 annual_return = average_daily_return * 252 * 100
+
+#--------------------
+# Risk-adjusted Performance
+#--------------------
+
+# alpha estimates return beyond benchmark exposure
 alpha = annual_return - beta * benchmark_annual_return
+
+# excess return per unit of total volatility
 sharpe_ratio = (annual_return - risk_free_rate) / annual_volatility
+
+# sortino ratio: excess return per unit downside volatility
 downside_returns = data["Returns"][data["Returns"] < 0]
 downside_volatility = downside_returns.std() * np.sqrt(252) * 100
-sortino_ratio = (annual_return - risk_free_rate) / downside_volatility
 
-max_drawdown = data["Drawdown"].min()
-# 5th percentile = 95% one-day VaR
-var_95 = np.percentile(data["Returns"].dropna() * 100, 5)
+if downside_volatility != 0:
+    sortino_ratio = (annual_return - risk_free_rate) / downside_volatility
+else:
+    sortino_ratio = np.nan
+
+#--------------------------
+# Downside risk: VaR and expected shortfall
+#--------------------------
+
+# clean returns in percentage form 
 returns_clean = data["Returns"].dropna() * 100
+
+# 95% one day Value at Risk
+var_95 = np.percentile(data["Returns"].dropna() * 100, 5)
+
+# expected shortfall: average loss on days worse than VaR
 expected_shortfall = returns_clean[returns_clean <= var_95].mean()
-# -----------------------------
-# Enhanced Investment Decision Support
-# -----------------------------
+
+#============================================
+# INVESTMENT DECISION 
+#============================================
 
 decision_score = 0
 decision_reasons = []
 risk_warnings = []
 
-# Return
+#----------------------
+# Return assessment
+#----------------------
+
 if annual_return > 15:
     decision_score += 2
     decision_reasons.append("Annualised return is strong.")
@@ -188,7 +336,10 @@ else:
     decision_score -= 2
     risk_warnings.append("Annualised return is below the risk-free rate.")
 
-# Sharpe Ratio
+#-------------------------------------
+# Sharpe Ratio assessment
+#-------------------------------------
+
 if sharpe_ratio > 1.5:
     decision_score += 2
     decision_reasons.append("Sharpe ratio is strong.")
@@ -199,7 +350,10 @@ else:
     decision_score -= 1
     risk_warnings.append("Sharpe ratio is weak.")
 
-# Sortino Ratio
+#----------------------------------------
+# Sortino Ratio assessment
+#----------------------------------------
+
 if sortino_ratio > 2:
     decision_score += 2
     decision_reasons.append("Sortino ratio suggests strong downside-adjusted performance.")
@@ -210,7 +364,10 @@ else:
     decision_score -= 1
     risk_warnings.append("Sortino ratio is weak.")
 
-# Drawdown
+#-------------------------------------------
+# Drawdown assessment
+#-------------------------------------------
+
 if max_drawdown > -15:
     decision_score += 2
     decision_reasons.append("Maximum drawdown is relatively controlled.")
@@ -221,7 +378,10 @@ else:
     decision_score -= 2
     risk_warnings.append("Maximum drawdown is severe.")
 
-# VaR
+#-------------------------------------------
+# Value at risk assessment
+#-------------------------------------------
+
 if var_95 > -2:
     decision_score += 2
     decision_reasons.append("Daily VaR is relatively low.")
@@ -232,7 +392,10 @@ else:
     decision_score -= 2
     risk_warnings.append("Daily VaR is high.")
 
-# Beta
+#----------------------------
+# Beta assessment
+#----------------------------
+
 if beta < 0.8:
     decision_score += 1
     decision_reasons.append("Beta is defensive versus the benchmark.")
@@ -243,7 +406,10 @@ else:
     decision_score -= 1
     risk_warnings.append("Beta is high, meaning the stock is more market-sensitive.")
 
-# Alpha
+#--------------------------------------------
+# Alpha assessment 
+#--------------------------------------------
+
 if alpha > 5:
     decision_score += 2
     decision_reasons.append("Alpha is positive, suggesting outperformance versus benchmark exposure.")
@@ -254,7 +420,10 @@ else:
     decision_score -= 1
     risk_warnings.append("Alpha is negative versus benchmark exposure.")
 
-# RSI
+#-----------------------------------------
+# RSI assessment
+#-----------------------------------------
+
 latest_rsi = data["RSI"].dropna().iloc[-1]
 
 if latest_rsi > 75:
@@ -267,16 +436,23 @@ else:
     decision_score += 1
     decision_reasons.append("RSI is not showing extreme overbought conditions.")
 
+#----------------------------------------
+# Final dashboard signal 
+#----------------------------------------
 if decision_score >= 9:
-    decision_signal = "Potential Buy"
+    decision_signal = "Strong Buy Candidate"
+elif decision_score >= 7:
+    decision_signal = "Positive / Watch"
 elif decision_score >= 5:
-    decision_signal = "Watch / Hold"
-elif decision_score >= 1:
-    decision_signal = "Wait"
+    decision_signal = "Neutral / Hold"
+elif decision_score >= 2:
+    decision_signal = "Cautious"
 else:
-    decision_signal = "High Risk / Avoid"
+    decision_signal = "High Risk"
 
-st.subheader("Company Information")
+#=====================================================
+# EXTRACT COMPANY FUNDAMENTALS
+#=====================================================
 
 company_name = stock_info.get("longName", ticker)
 sector = stock_info.get("sector", "N/A")
@@ -284,6 +460,245 @@ industry = stock_info.get("industry", "N/A")
 market_cap = stock_info.get("marketCap", "N/A")
 pe_ratio = stock_info.get("trailingPE", "N/A")
 dividend_yield = stock_info.get("dividendYield", "N/A")
+
+#=====================================================
+# EXTRACT VALUATION METRICS
+#=====================================================
+
+# forward price-to-earnings ratio
+forward_pe = stock_info.get("forwardPE", np.nan)
+
+# price to book compares stock price to company net assets
+price_to_book = stock_info.get("priceToBook", np.nan)
+
+#p/e adjusted for growth
+peg_ratio = stock_info.get("pegRatio", np.nan)
+
+# return on equity 
+roe = stock_info.get("returnOnEquity", np.nan)
+
+# debt to equity 
+debt_to_equity = stock_info.get("debtToEquity", np.nan)
+
+# free cashflow yield - harder to manipulate
+free_cashflow = stock_info.get("freeCashflow", np.nan)
+
+enterprise_value = stock_info.get("enterpriseValue", np.nan)
+
+# Free Cash Flow Yield
+if (
+    free_cashflow is not np.nan
+    and enterprise_value is not np.nan
+    and enterprise_value != 0
+):
+    fcf_yield = (free_cashflow / enterprise_value) * 100
+else:
+    fcf_yield = np.nan
+
+#=====================================================
+# UNDERVALUATION ENGINE
+#=====================================================
+
+valuation_score = 0
+valuation_reasons = []
+valuation_risks = []
+
+# -------------------------
+# Forward P/E
+# -------------------------
+
+if pd.notna(forward_pe):
+
+    if forward_pe < 15:
+        valuation_score += 15
+        valuation_reasons.append(
+            "Forward P/E is relatively low."
+        )
+
+    elif forward_pe < 25:
+        valuation_score += 8
+
+    else:
+        valuation_score -= 8
+        valuation_risks.append(
+            "Forward P/E is relatively high."
+        )
+
+# -------------------------
+# PEG Ratio
+# -------------------------
+
+if pd.notna(peg_ratio):
+
+    if peg_ratio < 1:
+        valuation_score += 15
+        valuation_reasons.append(
+            "PEG ratio suggests attractive growth-adjusted valuation."
+        )
+
+    elif peg_ratio < 2:
+        valuation_score += 8
+
+    else:
+        valuation_score -= 10
+        valuation_risks.append(
+            "PEG ratio suggests expensive growth expectations."
+        )
+
+# -------------------------
+# ROE
+# -------------------------
+
+if pd.notna(roe):
+
+    roe_pct = roe * 100
+
+    if roe_pct > 20:
+        valuation_score += 15
+        valuation_reasons.append(
+            "ROE is very strong."
+        )
+
+    elif roe_pct > 10:
+        valuation_score += 8
+
+    else:
+        valuation_score -= 5
+        valuation_risks.append(
+            "ROE is relatively weak."
+        )
+
+# -------------------------
+# Debt-to-Equity
+# -------------------------
+
+if pd.notna(debt_to_equity):
+
+    if debt_to_equity < 50:
+        valuation_score += 10
+        valuation_reasons.append(
+            "Debt levels appear controlled."
+        )
+
+    elif debt_to_equity > 150:
+        valuation_score -= 10
+        valuation_risks.append(
+            "Debt levels are elevated."
+        )
+
+# -------------------------
+# Free Cash Flow Yield
+# -------------------------
+
+if pd.notna(fcf_yield):
+
+    if fcf_yield > 5:
+        valuation_score += 15
+        valuation_reasons.append(
+            "Free cash flow yield is attractive."
+        )
+
+    elif fcf_yield < 2:
+        valuation_score -= 8
+        valuation_risks.append(
+            "Free cash flow yield is relatively low."
+        )
+
+# -------------------------
+# Alpha
+# -------------------------
+
+if alpha > 5:
+    valuation_score += 10
+    valuation_reasons.append(
+        "Alpha suggests market outperformance."
+    )
+
+elif alpha < 0:
+    valuation_score -= 5
+
+# -------------------------
+# Sharpe Ratio
+# -------------------------
+
+if sharpe_ratio > 1:
+    valuation_score += 10
+
+elif sharpe_ratio < 0:
+    valuation_score -= 10
+
+# -------------------------
+# RSI
+# -------------------------
+
+if latest_rsi < 35:
+    valuation_score += 5
+    valuation_reasons.append(
+        "RSI suggests the stock may be oversold."
+    )
+
+elif latest_rsi > 75:
+    valuation_score -= 5
+    valuation_risks.append(
+        "RSI suggests overbought conditions."
+    )
+
+# -------------------------
+# Clamp score to 0-100
+# -------------------------
+
+valuation_score = max(0, min(100, valuation_score))
+
+
+# -------------------------
+# Final interpretation
+# -------------------------
+
+if valuation_score >= 80:
+    valuation_signal = (
+        "Strong Undervaluation Characteristics"
+    )
+
+elif valuation_score >= 60:
+    valuation_signal = (
+        "Moderately Attractive Valuation"
+    )
+
+elif valuation_score >= 40:
+    valuation_signal = (
+        "Fairly Valued / Mixed"
+    )
+
+elif valuation_score >= 20:
+    valuation_signal = (
+        "Expensive Characteristics"
+    )
+
+else:
+    valuation_signal = (
+        "Strong Overvaluation Risk"
+    )
+
+#=====================================================
+# MAIN SECTION
+#=====================================================
+
+# Page title shown at the top
+st.title("Stock Market Dashboard")
+
+if show_walkthrough:
+    st.info("""
+    This dashboard analyses a single stock using price data, risk metrics,
+    technical indicators, benchmark comparison, and Monte Carlo simulation.
+
+    The final dashboard signal is not financial advice. It is a quantitative
+    summary based on historical return, risk, momentum, drawdown, beta, alpha,
+    and volatility.
+    """)
+
+st.header("Single Stock Analysis")
+
+st.subheader("Company Information")
 
 st.write(f"**Company:** {company_name}")
 st.write(f"**Sector:** {sector}")
@@ -335,26 +750,198 @@ except Exception:
 
 # show the data
 st.subheader("Raw Stock Data")
+
 st.write(data)
+
 st.subheader("Key Statistics")
 
-st.write(f"Latest Price: ${latest_price:.2f}")
-st.write(f"{period} Return: {total_return:.2f}%")
-st.write(f"Annualised Return: {annual_return:.2f}%")
-st.write(f"Annual Volatility: {annual_volatility:.2f}%")
-st.write(f"Risk-Free Rate: {risk_free_rate:.2f}%")
-st.write(f"Sharpe Ratio: {sharpe_ratio:.2f}")
-st.write(f"Sortino Ratio: {sortino_ratio:.2f}")
-st.write("""
-Sortino Ratio is similar to Sharpe Ratio, but it only penalises downside risk.
-A higher Sortino Ratio suggests the stock has delivered better returns relative to harmful volatility.
-""")
-st.write(f"Beta vs {benchmark}: {beta:.2f}")
-st.write(f"Alpha vs {benchmark}: {alpha:.2f}%")
+key_stats = {
+    "Metric": [
+        "Latest Price",
+        f"{period} Return (ROI)",
+        "Annualised Return",
+        "Annual Volatility",
+        "Risk-Free Rate",
+        "Sharpe Ratio",
+        "Sortino Ratio",
+        f"Beta vs {benchmark}",
+        f"Alpha vs {benchmark}",
+        "Maximum Drawdown",
+        "95% 1-Day VaR",
+        "Expected Shortfall"
+    ],
 
-st.write(f"Maximum Drawdown: {max_drawdown:.2f}%")
-st.write(f"95% 1-Day VaR: {var_95:.2f}%")
-st.write(f"Expected Shortfall: {expected_shortfall:.2f}%")
+    "Value": [
+        f"${latest_price:.2f}",
+        f"{total_return:.2f}%",
+        f"{annual_return:.2f}%",
+        f"{annual_volatility:.2f}%",
+        f"{risk_free_rate:.2f}%",
+        f"{sharpe_ratio:.2f}",
+        f"{sortino_ratio:.2f}",
+        f"{beta:.2f}",
+        f"{alpha:.2f}%",
+        f"{max_drawdown:.2f}%",
+        f"{var_95:.2f}%",
+        f"{expected_shortfall:.2f}%"
+    ]
+}
+
+key_stats_df = pd.DataFrame(key_stats)
+
+st.table(key_stats_df)
+
+st.subheader("Valuation Metrics")
+
+st.write("""
+Valuation metrics help assess whether a stock may be cheap, expensive,
+financially strong, or risky relative to its fundamentals.
+
+No single metric should be used alone. Investors typically combine
+valuation, profitability, growth, and risk measures together.
+""")
+
+valuation_table = {
+    "Metric": [
+        "Forward P/E",
+        "Price to Book",
+        "PEG Ratio",
+        "Return on Equity",
+        "Debt to Equity",
+        "Free Cash Flow Yield"
+    ],
+
+    "Value": [
+        f"{forward_pe:.2f}" if pd.notna(forward_pe) else "N/A",
+
+        f"{price_to_book:.2f}" if pd.notna(price_to_book) else "N/A",
+
+        f"{peg_ratio:.2f}" if pd.notna(peg_ratio) else "N/A",
+
+        f"{roe * 100:.2f}%"
+        if pd.notna(roe) else "N/A",
+
+        f"{debt_to_equity:.2f}"
+        if pd.notna(debt_to_equity) else "N/A",
+
+        f"{fcf_yield:.2f}%"
+        if pd.notna(fcf_yield) else "N/A"
+    ]
+}
+
+valuation_df = pd.DataFrame(valuation_table)
+
+st.dataframe(
+    valuation_df,
+    use_container_width=True,
+    hide_index=True
+)
+
+st.subheader("Valuation Interpretation Guide")
+
+valuation_guide = {
+    "Metric": [
+        "Forward P/E",
+        "Price-to-Book",
+        "PEG Ratio",
+        "Return on Equity (ROE)",
+        "Debt-to-Equity",
+        "Free Cash Flow Yield"
+    ],
+
+    "What It Measures": [
+        "Price relative to expected future earnings",
+        "Price relative to company net assets",
+        "Valuation adjusted for expected growth",
+        "How efficiently shareholder capital is used",
+        "How much debt the company uses",
+        "Cash generation relative to company value"
+    ],
+
+    "Generally Attractive": [
+        "Lower than peers",
+        "Reasonable relative to industry",
+        "Below 1.5 ideally",
+        "High and stable",
+        "Moderate or low",
+        "Higher is usually better"
+    ],
+
+    "Possible Warning Signs": [
+        "Extremely high valuation",
+        "Very high without strong profitability",
+        "Very high PEG may suggest overpricing",
+        "Persistently weak profitability",
+        "Very high leverage",
+        "Very low or negative cash flow generation"
+    ]
+}
+
+valuation_guide_df = pd.DataFrame(valuation_guide)
+
+st.dataframe(
+    valuation_guide_df,
+    use_container_width=True,
+    hide_index=True
+)
+
+st.divider()
+
+st.subheader("Undervaluation Engine")
+
+st.write(f"### Valuation Score: {valuation_score}/100")
+
+st.write(f"### Interpretation: {valuation_signal}")
+
+st.write("**Positive Valuation Factors:**")
+
+for reason in valuation_reasons:
+    st.write(f"- {reason}")
+
+st.write("**Potential Valuation Risks:**")
+
+for risk in valuation_risks:
+    st.write(f"- {risk}")
+
+st.subheader("Valuation Score Guide")
+
+valuation_score_guide = {
+    "Score Range": [
+        "80 - 100",
+        "60 - 79",
+        "40 - 59",
+        "20 - 39",
+        "0 - 19"
+    ],
+
+    "Interpretation": [
+        "Strong undervaluation characteristics",
+        "Moderately attractive valuation",
+        "Fairly valued / mixed signals",
+        "Expensive characteristics",
+        "Strong overvaluation risk"
+    ],
+
+    "Typical Characteristics": [
+        "Strong profitability, attractive valuation, controlled risk",
+        "Good fundamentals with some minor valuation concerns",
+        "Balanced positives and negatives",
+        "Expensive relative to fundamentals or growth",
+        "Very high valuation and/or weak fundamentals"
+    ]
+}
+
+valuation_score_guide_df = pd.DataFrame(
+    valuation_score_guide
+)
+
+st.dataframe(
+    valuation_score_guide_df,
+    use_container_width=True,
+    hide_index=True
+)
+
+st.divider()
 
 st.subheader("Investment Decision Support")
 
@@ -421,8 +1008,19 @@ beta_table = {
 }
 
 st.table(beta_table)
+st.divider()
 
 st.subheader("Closing Price with Moving Averages")
+
+st.write("""
+This chart shows the stock price together with short-term and long-term moving averages.
+
+Key things to watch:
+- Price above moving averages can suggest upward momentum.
+- Price below moving averages can suggest weakness.
+- A short moving average crossing above a long moving average can be a bullish signal.
+- A short moving average crossing below a long moving average can be a bearish signal.
+""")
 
 fig, ax = plt.subplots()
 
@@ -437,15 +1035,18 @@ ax.legend()
 ax.grid()
 
 st.pyplot(fig)
+st.divider()
 
 st.subheader("Relative Strength Index (RSI)")
 
 st.write("""
-RSI measures recent momentum on a scale from 0 to 100.
+RSI measures whether recent buying or selling pressure is unusually strong.
 
-- Above 70 may suggest the stock is overbought.
-- Below 30 may suggest the stock is oversold.
-- Around 50 suggests balanced momentum.
+Key things to watch:
+- RSI above 70 may suggest the stock is overbought.
+- RSI below 30 may suggest the stock is oversold.
+- RSI around 50 suggests balanced momentum.
+- RSI should not be used alone; it is best combined with trend and risk metrics.
 """)
 
 fig_rsi, ax_rsi = plt.subplots()
@@ -464,16 +1065,18 @@ ax_rsi.legend()
 ax_rsi.grid()
 
 st.pyplot(fig_rsi)
+st.divider()
 
 st.subheader("Bollinger Bands")
 
 st.write("""
-Bollinger Bands show where the stock price sits relative to its recent average range.
+Bollinger Bands show whether the price is high or low relative to its recent trading range.
 
-- Price near the upper band suggests strong recent momentum.
+Key things to watch:
+- Price near the upper band suggests strong recent price action.
 - Price near the lower band suggests weakness or possible oversold conditions.
-- Wider bands mean higher volatility.
-- Narrower bands mean lower volatility.
+- Widening bands suggest increasing volatility.
+- Narrowing bands suggest calmer trading conditions.
 """)
 
 fig_bb, ax_bb = plt.subplots()
@@ -497,12 +1100,14 @@ ax_bb.legend()
 ax_bb.grid()
 
 st.pyplot(fig_bb)
+st.divider()
 
 st.subheader("MACD")
 
 st.write("""
 MACD compares short-term and long-term momentum.
 
+Key things to watch:
 - MACD above the signal line suggests bullish momentum.
 - MACD below the signal line suggests bearish momentum.
 - A rising histogram suggests momentum is strengthening.
@@ -535,8 +1140,19 @@ ax_macd.legend()
 ax_macd.grid()
 
 st.pyplot(fig_macd)
+st.divider()
 
 st.subheader("Trend Forecast")
+
+st.write("""
+This forecast fits a simple linear trend to historical prices and extends it forward.
+
+Key things to watch:
+- An upward forecast line suggests the recent trend has been positive.
+- A downward forecast line suggests the recent trend has been negative.
+- This is not a true prediction; it assumes the historical trend continues.
+- Use this as a simple visual guide, not a trading signal.
+""")
 
 # Create x-values: 0, 1, 2, ..., n-1
 x = np.arange(len(close))
@@ -608,8 +1224,175 @@ forecast_final_price = forecast_prices[-1]
 
 st.write(f"Forecast Price in {forecast_days} Trading Days: ${forecast_final_price:.2f}")
 st.write(f"Average Daily Trend: ${slope:.4f}")
+st.divider()
+
+st.subheader("Probabilistic Monte Carlo Forecast")
+
+st.write("""
+This forecast uses Monte Carlo simulation to estimate a range of possible future prices.
+
+Key things to watch:
+- The central line shows the average expected price path.
+- The darker band contains more likely outcomes.
+- The lighter band contains more extreme but still realistic outcomes.
+- Wider bands suggest greater uncertainty and volatility.
+""")
+
+# -------------------------
+# Forecast simulation settings
+# -------------------------
+
+forecast_sims = 500
+
+forecast_returns_mean = data["Returns"].mean()
+forecast_returns_std = data["Returns"].std()
+
+forecast_last_price = close.iloc[-1]
+
+# Store simulations
+forecast_simulations = np.zeros(
+    (forecast_days, forecast_sims)
+)
+
+# -------------------------
+# Run Monte Carlo simulation
+# -------------------------
+
+for sim in range(forecast_sims):
+
+    simulated_prices = [forecast_last_price]
+
+    for day in range(1, forecast_days):
+
+        simulated_return = np.random.normal(
+            forecast_returns_mean,
+            forecast_returns_std
+        )
+
+        next_price = (
+            simulated_prices[-1]
+            * (1 + simulated_return)
+        )
+
+        simulated_prices.append(next_price)
+
+    forecast_simulations[:, sim] = simulated_prices
+
+
+# -------------------------
+# Create percentile bands
+# -------------------------
+
+mean_forecast = forecast_simulations.mean(axis=1)
+
+lower_5 = np.percentile(
+    forecast_simulations,
+    5,
+    axis=1
+)
+
+upper_95 = np.percentile(
+    forecast_simulations,
+    95,
+    axis=1
+)
+
+lower_25 = np.percentile(
+    forecast_simulations,
+    25,
+    axis=1
+)
+
+upper_75 = np.percentile(
+    forecast_simulations,
+    75,
+    axis=1
+)
+
+
+# -------------------------
+# Future dates
+# -------------------------
+
+forecast_dates = pd.date_range(
+    start=close.index[-1],
+    periods=forecast_days,
+    freq="B"
+)
+
+
+# -------------------------
+# Plot forecast
+# -------------------------
+
+fig_prob, ax_prob = plt.subplots()
+
+# Historical prices
+ax_prob.plot(
+    close.index,
+    close,
+    linewidth=2,
+    label="Historical Price"
+)
+
+# Mean expected path
+ax_prob.plot(
+    forecast_dates,
+    mean_forecast,
+    linewidth=2,
+    label="Expected Path"
+)
+
+# Outer uncertainty band
+ax_prob.fill_between(
+    forecast_dates,
+    lower_5,
+    upper_95,
+    alpha=0.15,
+    label="5%-95% Range"
+)
+
+# Inner uncertainty band
+ax_prob.fill_between(
+    forecast_dates,
+    lower_25,
+    upper_75,
+    alpha=0.3,
+    label="25%-75% Range"
+)
+
+ax_prob.set_title(
+    f"{ticker} Probabilistic Forecast"
+)
+
+ax_prob.set_xlabel("Date")
+ax_prob.set_ylabel("Price")
+
+ax_prob.legend()
+ax_prob.grid()
+
+ax_prob.xaxis.set_major_locator(
+    mdates.MonthLocator(interval=1)
+)
+
+ax_prob.xaxis.set_major_formatter(
+    mdates.DateFormatter("%b %Y")
+)
+
+fig_prob.autofmt_xdate(rotation=45)
+
+st.pyplot(fig_prob)
 
 st.subheader("Performance vs Benchmark")
+
+st.write("""
+This chart compares the stock against a benchmark by rebasing both to 100.
+
+Key things to watch:
+- If the stock line is above the benchmark, it has outperformed.
+- If it is below the benchmark, it has underperformed.
+- This helps judge whether the stock was better than simply buying the market.
+""")
 
 fig_bench, ax_bench = plt.subplots()
 
@@ -623,7 +1406,19 @@ ax_bench.legend()
 ax_bench.grid()
 
 st.pyplot(fig_bench)
+st.divider()
+
 st.subheader("Security Characteristic Line")
+
+st.write("""
+This chart compares the stock's daily returns with the benchmark's daily returns.
+
+Key things to watch:
+- A steeper fitted line means higher beta.
+- Beta above 1 means the stock is more sensitive than the market.
+- Beta below 1 means the stock is less sensitive than the market.
+- The scatter shows how closely the stock moves with the benchmark.
+""")
 
 fig_scl, ax_scl = plt.subplots()
 
@@ -651,9 +1446,19 @@ ax_scl.legend()
 ax_scl.grid()
 
 st.pyplot(fig_scl)
-
+st.divider()
 
 st.subheader("Daily Returns")
+
+st.write("""
+This chart shows the stock's daily percentage returns.
+
+Key things to watch:
+- Green bars are positive return days.
+- Red bars are negative return days.
+- Large bars show unusually volatile days.
+- Clusters of large bars suggest periods of elevated market uncertainty.
+""")
 
 fig2, ax2 = plt.subplots()
 
@@ -677,6 +1482,7 @@ ax2.axhline(0, linestyle="--", color="green",linewidth=1)
 ax2.grid()
 
 st.pyplot(fig2)
+st.divider()
 
 st.subheader("Time Series Autocorrelation")
 st.write("""
@@ -783,6 +1589,7 @@ ax_acf.grid()
 st.write(f"Regression Slope: {slope:.4f}")
 
 st.pyplot(fig_acf)
+st.divider()
 
 st.subheader("Autocorrelation by Lag")
 
@@ -861,8 +1668,18 @@ ax_lags.legend()
 ax_lags.grid(axis="y")
 
 st.pyplot(fig_lags)
+st.divider()
 
 st.subheader("Rolling Volatility")
+
+st.write("""
+Rolling volatility shows how risky the stock has been over time.
+
+Key things to watch:
+- Rising volatility means the stock is becoming more unstable.
+- Falling volatility means price movements are becoming calmer.
+- Very high volatility can increase downside risk even if returns are strong.
+""")
 
 fig3, ax3 = plt.subplots()
 
@@ -884,6 +1701,7 @@ ax3.axhline(40, linestyle="--", linewidth=1)
 ax3.grid()
 
 st.pyplot(fig3)
+st.divider()
 
 st.subheader("Rolling Sharpe Ratio")
 
@@ -895,6 +1713,12 @@ relative to risk over the last 63 trading days (about 3 months).
 - Above 1: Good
 - Around 0: Limited reward for risk
 - Negative: Poor risk-adjusted performance
+""")
+st.write("""
+Key things to watch:
+- A rising Rolling Sharpe suggests improving risk-adjusted performance.
+- A falling Rolling Sharpe suggests returns are becoming less attractive relative to risk.
+- Negative values mean the stock has not rewarded investors for the risk taken.
 """)
 
 fig_sharpe, ax_sharpe = plt.subplots()
@@ -923,8 +1747,18 @@ ax_sharpe.legend()
 ax_sharpe.grid()
 
 st.pyplot(fig_sharpe)
+st.divider()
 
 st.subheader("Drawdown")
+
+st.write("""
+Drawdown measures how far the stock has fallen from its previous peak.
+
+Key things to watch:
+- 0% means the stock is at or near a new high.
+- A deeper negative value means a larger fall from the peak.
+- Large drawdowns show how painful the investment could have been to hold.
+""")
 
 fig4, ax4 = plt.subplots()
 
@@ -949,8 +1783,19 @@ ax4.grid()
 ax4.legend()
 
 st.pyplot(fig4)
+st.divider()
 
 st.subheader("Distribution of Daily Returns")
+
+st.write("""
+This chart shows the distribution of daily returns.
+
+Key things to watch:
+- A wider distribution means higher volatility.
+- The red VaR line shows a bad daily outcome threshold.
+- Returns far in the left tail represent rare but severe losses.
+- If the actual bars differ strongly from the normal curve, returns may not be normally distributed.
+""")
 
 fig5, ax5 = plt.subplots()
 
@@ -991,18 +1836,10 @@ ax5.set_ylabel("Density")
 ax5.legend()
 
 st.pyplot(fig5)
+st.divider()
 
 st.header("Monte Carlo Simulation")
-simulation_days = st.sidebar.slider("Monte Carlo Forecast Days", 30, 365, 252)
 
-num_simulations = st.sidebar.slider("Number of Simulations", 100, 2000, 500)
-
-initial_investment = st.sidebar.number_input(
-    "Initial Investment (£)",
-    min_value=100.0,
-    value=1000.0,
-    step=100.0
-)
 
 daily_mean_return = data["Returns"].mean()
 daily_volatility = data["Returns"].std()
@@ -1106,6 +1943,7 @@ ax6.grid()
 ax6.legend()
 
 st.pyplot(fig6)
+st.divider()
 
 st.header("Portfolio Optimisation")
 
